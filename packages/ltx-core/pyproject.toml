@@ -32,6 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+convrot-rocm = ["comfy-kitchen==0.2.41"]
 natten = [
     # Pinned wheel + matching torch so DiffVAE does not hit TokPerm IMA on older
     # PyTorch/NVIDIA stacks. Keep in sync with install hints in attention.py /

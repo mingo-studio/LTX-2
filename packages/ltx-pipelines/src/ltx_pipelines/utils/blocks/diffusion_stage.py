@@ -37,6 +37,7 @@ from ltx_core.model.transformer.compiling import (
 )
 from ltx_core.model.transformer.model_configurator import transformer_checkpoint_selection_ops
 from ltx_core.quantization import QuantizationPolicy
+from ltx_core.quantization.convrot_int8 import with_convrot_int8
 from ltx_core.quantization.policy import compose_quantization
 from ltx_core.tools import AudioLatentTools, LatentTools, VideoLatentTools
 from ltx_core.types import (
@@ -131,6 +132,7 @@ class DiffusionStage:
         compilation_config: CompilationConfig | None = None,
         alloc_trim_strategy: AllocatorTrimStrategy = AllocatorTrimStrategy.TRIM,
         offload_mode: OffloadMode = OffloadMode.NONE,
+        convrot_int8: bool = False,
         model_configurator: type[ModelConfigurator] = LTXModelConfigurator,
         model_sd_ops: SDOps = LTXV_MODEL_COMFY_RENAMING_MAP,
         scale_factors: SpatioTemporalScaleFactors = VIDEO_SCALE_FACTORS,
@@ -166,6 +168,17 @@ class DiffusionStage:
                 loras=tuple(loras),
                 registry=unit_registry,
                 offload_mode=offload_mode,
+            )
+
+        if convrot_int8:
+            if quantization is not None or compilation_config is not None:
+                raise ValueError("ConvRot INT8 requires eager execution and cannot be combined with other quantization")
+            base = transformer_builder.base if isinstance(transformer_builder, StreamingBuilder) else transformer_builder
+            base = with_convrot_int8(
+                base, component="transformer", selection=transformer_checkpoint_selection_ops(base.model_config())
+            )
+            transformer_builder = (
+                replace(transformer_builder, base=base) if isinstance(transformer_builder, StreamingBuilder) else base
             )
 
         return cls(
