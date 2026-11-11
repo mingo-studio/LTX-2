@@ -78,3 +78,9 @@ Gemma and embeddings layers require native HIP ConvRot execution. Video and
 audio VAEs use their original BF16 weights. This mode requires eager execution
 and a pre-quantized split pack. LoRA fusion into the quantized weights is
 unsupported.
+
+ROCm ConvRot mode configures the process to bypass MIOpen, uses the ordinary
+Conv VAE decoder, and defaults to 256-pixel spatial tiles with 32-frame temporal
+tiles. This matches the previously measured W7900 convolution path. An explicit
+tiling configuration supplied through the Python API takes precedence. The
+vocoder loads and computes in FP32 on every backend.

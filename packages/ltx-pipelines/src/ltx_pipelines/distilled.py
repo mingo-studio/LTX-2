@@ -16,6 +16,7 @@ from ltx_core.model.video_vae import AUTO_TILING, AutoTiling, TilingConfig
 from ltx_core.model.video_vae.transformer import DiffVAEMode
 from ltx_core.quantization import QuantizationPolicy
 from ltx_core.quantization.convrot_int8 import measure_hip_calls
+from ltx_core.tiling import TileSizeConfig, DimensionSizeConfig
 from ltx_core.types import LatentState, VideoPixelShape
 from ltx_pipelines.chunks import (
     Chunk,
@@ -189,6 +190,10 @@ class DistilledPipeline:
         convrot_int8: bool = False,
     ):
         self.device = device or get_device()
+        self._rocm_int8 = convrot_int8 and bool(torch.version.hip)
+        if self._rocm_int8:
+            # RDNA3 Conv3d is substantially slower through MIOpen.
+            torch.backends.cudnn.enabled = False
         self.dtype = torch.bfloat16
         registry = registry or ModelRegistry()
 
@@ -237,6 +242,7 @@ class DistilledPipeline:
             self.device,
             registry=registry,
             alloc_trim_strategy=alloc_trim_strategy,
+            memory_efficient=not self._rocm_int8,
             diffvae_optimization=diffvae_optimization,
         )
         self.audio_decoder = AudioDecoder(
@@ -308,6 +314,12 @@ class DistilledPipeline:
         if chunk_config is None:
             chunk_config = ChunkConfig(chunk_pixel_frames=resolved_num_frames, next_video_carry_frames=0)
 
+        if self._rocm_int8 and isinstance(tiling_config, AutoTiling):
+            tiling_config = TileSizeConfig(
+                frames=DimensionSizeConfig(tile_size=32, overlap=8),
+                height=DimensionSizeConfig(tile_size=256, overlap=64),
+                width=DimensionSizeConfig(tile_size=256, overlap=64),
+            )
         resolved_tiling_config = ensure_tiling_config(
             tiling_config,
             vae_checkpoint_path=self.video_decoder.checkpoint_path,

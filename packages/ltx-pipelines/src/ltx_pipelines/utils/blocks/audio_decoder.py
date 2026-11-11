@@ -55,11 +55,8 @@ class AudioDecoder:
     def __call__(self, latent: torch.Tensor) -> Audio:
         """Decode audio *latent* through VAE decoder + vocoder, then free both."""
         logger.info("Building audio decoder + vocoder from %s", self._checkpoint_path)
-        # The vocoder always runs in fp32 (bf16 accumulation degrades spectral
-        # metrics). On CUDA/CPU it is stored in bf16 and autocast upcasts per-op to
-        # save memory; MPS has no fp32 autocast, so store it in fp32 directly and
-        # avoid the per-call cast. Negligible footprint for this small model.
-        vocoder_dtype = torch.float32 if self._device.type == "mps" else self._dtype
+        # Keep FP32 vocoder weights ready for its FP32 forward on every backend.
+        vocoder_dtype = torch.float32
         with (
             gpu_model(
                 self._decoder_builder.build(device=self._device, dtype=self._dtype).eval(),

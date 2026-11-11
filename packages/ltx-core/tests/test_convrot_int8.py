@@ -79,3 +79,30 @@ def test_hip_kernel_matches_convrot_reference(tmp_path):
     )
     assert calls == {"test": 1}
     torch.testing.assert_close(actual, expected, atol=0.5, rtol=0.02)
+
+
+def test_vocoder_materializes_fp32_weights_without_unsupported_autocast():
+    from ltx_core.model.audio_vae.vocoder import VocoderWithBWE
+
+    class TinyVocoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = nn.Conv1d(2, 2, 1).to(torch.bfloat16)
+
+        def forward(self, value):
+            return self.conv(value.mean(dim=-1))
+
+    model = VocoderWithBWE.__new__(VocoderWithBWE)
+    nn.Module.__init__(model)
+    model.vocoder = TinyVocoder()
+    model.bwe_generator = TinyVocoder()
+    model.resampler = nn.Identity()
+    model.input_sampling_rate = model.output_sampling_rate = 48000
+    model.hop_length = 1
+    model._compute_mel = lambda value: value.unsqueeze(2)
+    with torch.inference_mode():
+        output = model(torch.randn(1, 2, 16, 4, dtype=torch.bfloat16))
+    assert output.dtype == torch.bfloat16
+    assert output.shape == (1, 2, 16)
+    assert torch.isfinite(output).all()
+    assert all(value.dtype == torch.bfloat16 for value in model.parameters())
