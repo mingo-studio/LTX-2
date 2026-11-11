@@ -10,6 +10,7 @@ from ltx_core.allocator_trim_strategy import AllocatorTrimStrategy
 from ltx_core.loader.registry import ModelRegistry
 from ltx_core.loader.simple_builder import SimpleBuilder
 from ltx_core.loader.streaming_builder import StreamingBuilder, StreamingConfig
+from ltx_core.quantization.convrot_int8 import with_convrot_int8
 from ltx_core.text_encoders.gemma import (
     EMBEDDINGS_PROCESSOR_KEY_OPS,
     EmbeddingsProcessorConfigurator,
@@ -49,6 +50,7 @@ class PromptEncoder:
         alloc_trim_strategy: AllocatorTrimStrategy = AllocatorTrimStrategy.TRIM,
         prompt_enhancer_gemma_root: str | None = None,
         enhancer_text_encoder_builder: SimpleBuilder | None = None,
+        convrot_int8: bool = False,
     ) -> None:
         text_encoder_path = model_paths.text_encoder()
         embeddings_paths = model_paths.embeddings_weight_paths
@@ -67,6 +69,8 @@ class PromptEncoder:
 
         unit_registry = registry or ModelRegistry()
 
+        if convrot_int8 and text_encoder_builder is not None:
+            raise ValueError("ConvRot INT8 requires the standard Gemma builder")
         if text_encoder_builder is not None:
             encode_type = text_encoder_builder.model_config().get("model_type") or gemma_model_type(text_encoder_path)
         else:
@@ -96,6 +100,8 @@ class PromptEncoder:
                 gemma_module_ops,
                 registry=unit_registry,
             )
+            if convrot_int8:
+                self._text_encoder_builder = with_convrot_int8(self._text_encoder_builder, component="text_encoder")
             self._streaming_text_encoder_builder = StreamingBuilder(
                 self._text_encoder_builder,
                 StreamingConfig(
@@ -126,6 +132,10 @@ class PromptEncoder:
             (EMBEDDINGS_PROCESSOR_KEY_OPS,),
             registry=unit_registry,
         )
+        if convrot_int8:
+            self._embeddings_processor_builder = with_convrot_int8(
+                self._embeddings_processor_builder, component="embeddings"
+            )
 
     def _build_text_encoder(self) -> torch.nn.Module:
         """Build the Gemma text encoder (non-streaming path)."""

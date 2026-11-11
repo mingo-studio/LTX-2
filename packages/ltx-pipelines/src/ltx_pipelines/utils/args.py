@@ -1597,6 +1597,8 @@ def hq_2_stage_arg_parser(
 def default_2_stage_distilled_arg_parser(
     params: PipelineParams = LTX_2_3_PARAMS,
     supports_auto_duration: bool = False,
+    *,
+    spatial_upsampler_required: bool = True,
 ) -> argparse.ArgumentParser:
     parser = new_video_gen_arg_parser(params=params, distilled=True, supports_auto_duration=supports_auto_duration)
     parser.set_defaults(height=params.stage_2_height, width=params.stage_2_width)
@@ -1614,7 +1616,7 @@ def default_2_stage_distilled_arg_parser(
     parser.add_argument(
         "--spatial-upsampler-path",
         type=resolve_existing_path,
-        required=True,
+        required=spatial_upsampler_required,
         help=(
             "Path to the spatial upsampler model used to increase the resolution "
             "of the generated video in the latent space."

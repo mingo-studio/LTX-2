@@ -52,3 +52,29 @@ See [Installation & Usage](docs/installation.md) for full setup, CLI modules, an
 
 - **[LTX-Core](../ltx-core/)** - Core model implementation and inference components (schedulers, guiders, noisers, patchifiers)
 - **[LTX-Trainer](../ltx-trainer/)** - Training and fine-tuning tools
+
+### LTX-2.5 ConvRot INT8 on ROCm
+
+Install the ROCm PyTorch build for the target device before installing the
+`ltx-core[convrot-rocm]` and `ltx-pipelines` packages from this fork. The optional
+extra pins the standalone HIP kernel package. For a single-stage clip with sound,
+use the split transformer, Gemma and VAE files:
+
+```bash
+python -m ltx_pipelines.distilled \
+  --convrot-int8 --single-stage --offload cpu \
+  --transformer-path /models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors \
+  --text-encoder-path /models/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors \
+  --video-vae-path /models/ltx-2.5-video-vae-conv-bf16.safetensors \
+  --audio-vae-path /models/ltx-2.5-audio-vae-bf16.safetensors \
+  --image /path/to/first-frame.png 0 0.85 \
+  --prompt "A steady shot of a lighthouse with the sound of soft ocean waves." \
+  --width 1024 --height 576 --frame-rate 24 --num-frames 121 --seed 7 \
+  --output-path /path/to/result.mp4
+```
+
+The loader preserves the INT8 weights and FP32 scales. Quantized transformer,
+Gemma and embeddings layers require native HIP ConvRot execution. Video and
+audio VAEs use their original BF16 weights. This mode requires eager execution
+and a pre-quantized split pack. LoRA fusion into the quantized weights is
+unsupported.

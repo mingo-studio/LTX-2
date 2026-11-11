@@ -15,6 +15,7 @@ from ltx_core.model.transformer.compiling import CompilationConfig
 from ltx_core.model.video_vae import AUTO_TILING, AutoTiling, TilingConfig
 from ltx_core.model.video_vae.transformer import DiffVAEMode
 from ltx_core.quantization import QuantizationPolicy
+from ltx_core.quantization.convrot_int8 import measure_hip_calls
 from ltx_core.types import LatentState, VideoPixelShape
 from ltx_pipelines.chunks import (
     Chunk,
@@ -167,7 +168,7 @@ class _DistilledRunContext:
 
 class DistilledPipeline:
     """
-    Two-stage distilled video generation pipeline.
+    Distilled video generation pipeline with optional spatial upsampling.
     Stage 1 generates video at half of the target resolution, then Stage 2 upsamples
     by 2x and refines with additional denoising steps for higher quality output.
     """
@@ -175,7 +176,7 @@ class DistilledPipeline:
     def __init__(  # noqa: PLR0913
         self,
         model_paths: ModelPaths,
-        spatial_upsampler_path: str,
+        spatial_upsampler_path: str | None,
         loras: list[LoraPathStrengthAndSDOps],
         device: torch.device | None = None,
         quantization: QuantizationPolicy | None = None,
@@ -185,6 +186,7 @@ class DistilledPipeline:
         alloc_trim_strategy: AllocatorTrimStrategy = AllocatorTrimStrategy.TRIM,
         prompt_enhancer_gemma_root: str | None = None,
         diffvae_optimization: DiffVAEMode = DiffVAEMode.CHUNKED_EAGER,
+        convrot_int8: bool = False,
     ):
         self.device = device or get_device()
         self.dtype = torch.bfloat16
@@ -198,6 +200,7 @@ class DistilledPipeline:
             offload_mode=offload_mode,
             alloc_trim_strategy=alloc_trim_strategy,
             prompt_enhancer_gemma_root=prompt_enhancer_gemma_root,
+            convrot_int8=convrot_int8,
         )
         self.image_conditioner = ImageConditioner(
             model_paths.video_vae(),
@@ -212,19 +215,22 @@ class DistilledPipeline:
             self.device,
             loras=tuple(loras),
             quantization=quantization,
+            convrot_int8=convrot_int8,
             registry=registry,
             compilation_config=compilation_config,
             offload_mode=offload_mode,
             alloc_trim_strategy=alloc_trim_strategy,
         )
-        self.upsampler = VideoUpsampler(
-            model_paths.video_vae(),
-            spatial_upsampler_path,
-            self.dtype,
-            self.device,
-            registry=registry,
-            alloc_trim_strategy=alloc_trim_strategy,
-        )
+        self.upsampler = None
+        if spatial_upsampler_path is not None:
+            self.upsampler = VideoUpsampler(
+                model_paths.video_vae(),
+                spatial_upsampler_path,
+                self.dtype,
+                self.device,
+                registry=registry,
+                alloc_trim_strategy=alloc_trim_strategy,
+            )
         self.video_decoder = VideoDecoder(
             model_paths.video_vae(),
             self.dtype,
@@ -272,7 +278,7 @@ class DistilledPipeline:
         require_num_frames_source(num_frames, self.duration_predictor)
         enhance_prompt_image = images[0].path if images else None
         images = self.image_conditioner.load_conditionings(images, color_space)
-        assert_resolution(height=height, width=width, is_two_stage=True)
+        assert_resolution(height=height, width=width, is_two_stage=self.upsampler is not None)
         assert_generated_keyframes_request(decode_with_keyframes, generated_keyframes, self.stage)
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -328,8 +334,8 @@ class DistilledPipeline:
             audio_context=audio_context,
             num_frames=resolved_num_frames,
             tiling_config=resolved_tiling_config,
-            stage_1_width=width // 2,
-            stage_1_height=height // 2,
+            stage_1_width=width if self.upsampler is None else width // 2,
+            stage_1_height=height if self.upsampler is None else height // 2,
             chunk_config=chunk_config,
         )
 
@@ -488,18 +494,20 @@ class DistilledPipeline:
             noise_scale=1.0,
             **self._sampler_kwargs(seed, ANCESTRAL_NOISE_SEED_OFFSET),
         )
-        upscaled = spatially_upsample_chunks(base, self.upsampler)
-        refined = denoise_chunks(
-            upscaled,
-            self.stage,
-            sigmas=stage_2_sigmas,
-            noiser=ctx.noiser,
-            fps=frame_rate,
-            **self._sampler_kwargs(seed, ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET),
-        )
+        result = base
+        if self.upsampler is not None:
+            upscaled = spatially_upsample_chunks(base, self.upsampler)
+            result = denoise_chunks(
+                upscaled,
+                self.stage,
+                sigmas=stage_2_sigmas,
+                noiser=ctx.noiser,
+                fps=frame_rate,
+                **self._sampler_kwargs(seed, ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET),
+            )
         return (
             decode_chunks(
-                refined,
+                result,
                 self.video_decoder,
                 self.audio_decoder,
                 fps=frame_rate,
@@ -520,11 +528,19 @@ def main() -> None:
     parser = add_chunk_layout_args(
         add_keyframe_decode_arg(
             add_generated_keyframes_arg(
-                default_2_stage_distilled_arg_parser(params=params, supports_auto_duration=True)
+                default_2_stage_distilled_arg_parser(
+                    params=params, supports_auto_duration=True, spatial_upsampler_required=False
+                )
             )
         )
     )
+    parser.add_argument("--single-stage", action="store_true", help="Generate at output resolution without upsampling.")
+    parser.add_argument("--convrot-int8", action="store_true", help="Run split ConvRot INT8 weights on ROCm HIP.")
     args = parser.parse_args()
+    if args.single_stage == bool(args.spatial_upsampler_path):
+        parser.error("Specify either --single-stage or --spatial-upsampler-path.")
+    if args.convrot_int8 and not (torch.version.hip and torch.cuda.is_available()):
+        parser.error("--convrot-int8 requires a ROCm GPU.")
     hdr = resolve_hdr_color_space(images=args.images, hdr=args.hdr)
     video_marker, audio_marker = markers_from_args(args, device=get_device(), color_space=hdr)
     pipeline = DistilledPipeline(
@@ -536,35 +552,42 @@ def main() -> None:
         offload_mode=args.offload_mode,
         prompt_enhancer_gemma_root=args.prompt_enhancer_gemma_root,
         diffvae_optimization=args.diffvae_optimization,
+        convrot_int8=args.convrot_int8,
     )
     vae_dtype = vae_dtype_for_hdr(hdr, torch.bfloat16)
     chunk_config = chunk_config_from_args(args)
-    chunks, _, _ = pipeline.stream_chunks(
-        prompt=args.prompt,
-        seed=args.seed,
-        height=args.height,
-        width=args.width,
-        num_frames=args.num_frames,
-        frame_rate=args.frame_rate,
-        images=args.images,
-        vae_dtype=vae_dtype,
-        color_space=hdr,
-        enhance_prompt=args.enhance_prompt,
-        enhance_static_cache=args.enhance_static_cache,
-        tiling_config=AUTO_TILING,
-        generated_keyframes=args.num_generated_keyframes,
-        decode_with_keyframes=args.decode_with_keyframes,
-        chunk_config=chunk_config,
-    )
-    encode_media_segments(
-        chunks,
-        fps=args.frame_rate,
-        output_path=args.output_path,
-        video_chunks_number=None,
-        color_space=hdr,
-        video_marker=video_marker,
-        audio_marker=audio_marker,
-    )
+    with measure_hip_calls() as calls:
+        chunks, _, _ = pipeline.stream_chunks(
+            prompt=args.prompt,
+            seed=args.seed,
+            height=args.height,
+            width=args.width,
+            num_frames=args.num_frames,
+            frame_rate=args.frame_rate,
+            images=args.images,
+            vae_dtype=vae_dtype,
+            color_space=hdr,
+            enhance_prompt=args.enhance_prompt,
+            enhance_static_cache=args.enhance_static_cache,
+            tiling_config=AUTO_TILING,
+            generated_keyframes=args.num_generated_keyframes,
+            decode_with_keyframes=args.decode_with_keyframes,
+            chunk_config=chunk_config,
+        )
+        encode_media_segments(
+            chunks,
+            fps=args.frame_rate,
+            output_path=args.output_path,
+            video_chunks_number=None,
+            color_space=hdr,
+            video_marker=video_marker,
+            audio_marker=audio_marker,
+        )
+    if args.convrot_int8:
+        torch.cuda.synchronize(pipeline.device)
+        if not all(calls[component] > 0 for component in ("transformer", "text_encoder", "embeddings")):
+            raise RuntimeError("Native HIP ConvRot INT8 execution was not observed in every component")
+        logging.info("Completed HIP ConvRot INT8 operations: %s", dict(calls))
 
 
 if __name__ == "__main__":
